@@ -52,6 +52,16 @@ Type invLogit(Type x, Type scale, Type trans)
   return scale/(Type(1.0) + exp(-Type(1.0)*x)) - trans;
 }
 
+
+// invLogit
+template<class Type>
+Type square(Type x)
+{
+  return x*x;
+}
+
+
+
 // objective function
 template<class Type>
 Type objective_function<Type>::operator() ()
@@ -66,18 +76,19 @@ Type objective_function<Type>::operator() ()
   DATA_ARRAY(A_atg);            // Age observations by age, gear, time ( -1 == missing )
 
   // Model dimensions
-  int nG = Igt.dim(1);          // No. of surveys
-  int nT = Igt.dim(0);          // No of time steps
+  int nG = I_tg.dim(1);         // No. of surveys
+  int nT = I_tg.dim(0);         // No of time steps
   int nA = A_atg.dim(0);        // No of age classes
 
   // Model switches
   DATA_IVECTOR(survType_g);     // Type of index (0 = vuln bio, 1 = vuln numbers)
   DATA_IVECTOR(indexType_g);    // Type of survey (0 = relative, 1 = absolute)
-  DATA_IVECTOR(calcIndex_g);    // Type of fleet (0 = survey, 1 = commercial) 
+  DATA_IVECTOR(calcIndex_g);    // Calculate fleet index (0 = no, yes = 1)
   DATA_IVECTOR(selType_g);      // Type of selectivity (0 = asymptotic, 1 = domed (normal))
   DATA_VECTOR(fleetTiming);     // Fraction of year before catch/survey observation
-  DATA_IVECTOR(initCode);       // initialise at 0 => unfished, 1=> fished
+  DATA_INTEGER(initCode);       // initialise at 0 => unfished, 1=> fished
   DATA_SCALAR(posPenFactor);    // Positive-penalty multiplication factor
+  DATA_INTEGER(firstRecDev);    // First recruitment deviation
 
 
   /*\/\/\/\/\ PARAMETER SECTION /\/\/\/\*/
@@ -85,7 +96,7 @@ Type objective_function<Type>::operator() ()
   PARAMETER(lnB0);                      // Unfished spawning biomass
   PARAMETER(logit_ySteepness);          // SR steepness on (0,1)
   PARAMETER(lnM);                       // Natural mortality rates
-  PARAMETER(log_initN_mult);            // Non-eq initial numbers multiplier (nA-vector)
+  PARAMETER_VECTOR(log_initN_mult);     // Non-eq initial numbers multiplier (nA-vector)
 
   // Observation models //
   // Selectivity
@@ -98,7 +109,7 @@ Type objective_function<Type>::operator() ()
   // concentrated as cond. MLEs
 
   // Process errors //
-  PARAMETER_VECTOR(omegaR_t);           // Recruitment log-deviations
+  PARAMETER_VECTOR(recDevs_t);          // Recruitment log-deviations
   PARAMETER(lnsigmaR);                  // log scale recruitment SD          
   PARAMETER_VECTOR(omegaM_t);           // Natural mortality log-deviations
   PARAMETER(lnsigmaM);                  // log scale natural mortality SD
@@ -143,14 +154,18 @@ Type objective_function<Type>::operator() ()
   Type phi;               // ssbpr
   Type R0;                // unfished eqbm recruitment
 
+  // Recruitment devs
+  vector<Type> omegaR_t(nT);
+  for(int t = firstRecDev-1; t < nT; t++)
+    omegaR_t(t) = recDevs_t(t - firstRecDev + 1);
 
   // Optimisation and modeling quantities
   Type objFun = 0.;             // Objective function
   Type posPen = 0.;             // posFun penalty
   Type obsIdxNLL = 0.;          // observation indices NLL
   Type ageObsNLL = 0.;          // Age observation NLL
-  Type recNLL = 0.;             // recruitment deviations NLL
-  Type mortNLL = 0.;            // Mt devations NLL
+  Type recNLP = 0.;             // recruitment deviations NLL
+  Type mortNLP = 0.;            // Mt devations NLL
 
 
   // Life schedules
@@ -171,7 +186,7 @@ Type objective_function<Type>::operator() ()
   array<Type>   vulnN_atg(nA,nT,nG);    // Vulnerable numbers at age by gear
   vector<Type>  SB_t(nT+1);             // Spawning biomass
   vector<Type>  R_t(nT+1);              // Recruitments
-  vector<Type>  M_t(nT);                // Natural mortality vector
+  vector<Type>  M_t(nT+1);              // Natural mortality vector
   array<Type>   F_tg(nT,nG);            // Fleet fishing mortality
   array<Type>   uAge_atg(nA,nT,nG);     // Vuln proportion at age in each gear at each time
   array<Type>   catAge_atg(nA,nT,nG);   // Catch at age in each gear at each time step
@@ -202,18 +217,18 @@ Type objective_function<Type>::operator() ()
   // Calculate length curve
   len = Linf + (L1-Linf)*exp(-vonK*(age-1.));
   // Weight
-  wt  = c1*pow(len,c2);
+  wt  = lenWt(0)*pow(len,lenWt(1));
   // Maturity
-  tmp = log(19.)/( aMat(1) - aMat(0) );
+  Type tmp = log(19.)/( aMat(1) - aMat(0) );
   mat = 1./( 1. + exp(-tmp*( age - aMat(0) ) ) );    
 
   // Calculate Mortality time series
   // First and last year uses the
   // average/initial M
-  Mt(0) = M;
-  Mt(nT) = M;
+  M_t(0) = M;
+  M_t(nT) = M;
   for( int t = 1; t < nT; t++ )
-    Mt(t) = Mt(t-1)*exp(omegaM_t(t));
+    M_t(t) = M_t(t-1)*exp(omegaM_t(t-1));
 
 
   // Calculate selectivity
@@ -224,18 +239,19 @@ Type objective_function<Type>::operator() ()
     {
       // asymptotic
       Type aSel50   = SelAlpha_g(g);
-      Type aSel95   = SelAlpha_g(g) + SelBeta_g(g);
+      Type aSel95   = SelBeta_g(g);
       Type tmp      = log(19.)/( aSel95 - aSel50 );
-      sel_ag.col(g) = 1./( 1. + exp(-tmp*( age - aSel50 ) ) );
+      for( int a = 0; a < nA; a++ )
+        sel_ag(a,g) = 1./( 1. + exp(-tmp*( Type(age(a)) - aSel50 ) ) );
     }
 
     if( selType_g(g) == 1)
     {
       // domed (un-normalised gamma - or maybe normal ??)
-      Type dSelAlpha  = exp ( SelAlpha_g(g));
-      Type dSelBeta   = exp ( SelBeta_g(g) );
-      sel_ag.col(g)   = pow(age * dSelBeta / (dSelAlpha - 1),dSelAlpha-1)*
-                        exp ( dSelAlpha - 1 - age * dSelBeta );
+      Type dSelAlpha  = SelAlpha_g(g);
+      Type dSelBeta   = SelBeta_g(g);
+      for( int a = 0; a < nA; a++)
+        sel_ag(a,g)   = pow( age(a) * dSelBeta / (dSelAlpha - 1), dSelAlpha-1 ) * exp ( dSelAlpha - 1 - age(a) * dSelBeta );
     }    
   }
 
@@ -243,23 +259,32 @@ Type objective_function<Type>::operator() ()
   // new vector of indices in chronological order
   Type          minTime = 0;
   Type          prevTime = 0;
-  vector<Type>  usedFleet(nG);
+  vector<int>   usedFleet(nG);
   vector<int>   chronIdx(nG);
 
-  Type          lowG = 0;
+  usedFleet.fill(int(0));
+  chronIdx.fill(int(0));
 
-  for( int pIdx = 0; p < nG; p++ )
+  for( int pIdx = 0; pIdx < nG; pIdx++ )
   {
+    // Set max time to end of year (hiT), and
+    // lowG (idx with next smallest time) as the first fleet
+    Type        hiT = 1;
+    int         lowG = 0;
     // Loop over fleet timing vector, pull
     // get gear idx of minimum year fraction
-    for( gIdx = 0; g < nG; g++ )
+    for( int gIdx = 0; gIdx < nG; gIdx++ )
     {
+      // if( usedFleet(gIdx) == 1 )
+      //   next();
+
       if( ( fleetTiming(gIdx) >= minTime) & 
-          ( fleetTiming(gIdx) <= fleetTiming(lowG) ) &
-          ( usedFleet(gIdx)  == 0 ) )
+          ( fleetTiming(gIdx) <= hiT ) &
+          ( usedFleet(gIdx) == 0) )
       {
         // Record index of new lowest time that hasn't been used
         lowG      = gIdx;
+        hiT       = fleetTiming(gIdx);
       }
     }
     chronIdx(pIdx)  = lowG;
@@ -278,7 +303,7 @@ Type objective_function<Type>::operator() ()
   surv(nA-1) /= (1.0 - exp(-M));
 
   //phi calc
-  phi = sum( mat * wt * surv );
+  phi = ( mat * wt * surv ).sum();
 
   // Now compute R0 from B0
   R0 = B0/phi;
@@ -291,12 +316,15 @@ Type objective_function<Type>::operator() ()
   // Initialise population
   N_at.col(0) = R0 * surv;
   if( initCode == 1 )
-    Nat.col(0) *= initN_mult; 
+    N_at.col(0) *= initN_mult; 
 
-  // Calc biomass and spawning biomass in first year
-  Bat.col(0) = Nat.col(0) * wt;
-  SBt(0) = sum(Bat.col(0) * mat);
+  // Calc biomass, spawning biomass and rec in first year
+  B_at.col(0) = N_at.col(0) * wt;
+  SB_t(0) = sum(B_at.col(0) * mat);
+  R_t(0)  = N_at(0,0);
 
+  Type fracM = 0.;
+  Type lastFrac = 0.;
 
   // Loop over time steps, run pop dynamics
   for( int t = 1; t <= nT; t++ )
@@ -307,23 +335,29 @@ Type objective_function<Type>::operator() ()
     // Now compute loop over fleets and take
     // catch as necessary
     Type prevTime = 0.;
-    for( cIdx = 0; cIdx < nG; cIdx ++ )
+    for( int cIdx = 0; cIdx < nG; cIdx ++ )
     {
       // Get actual fleet number
-      gIdx = chronIdx(cIdx);
+      int gIdx = chronIdx(cIdx);
       // Get fraction of M being used to reduce Nat
-      Type fracM = fleetTiming(gIdx) - prevTime;
+      fracM = fleetTiming(gIdx) - prevTime;
 
       // First, vulnerable numbers is found by reducing
       // numbers by fracM
-      tmpN_at = tmpN_at * exp( - fracM * Mt(t-1) );
-      vulnN_atg.col(gIdx).col(t-1) = tmpN_at * sel_ag
-      vulnB_atg.col(gIdx).col(t-1) = vulnN_atg.col(gIdx).col(t-1)*wt;
-      vulnB_tg.col(gIdx).col(t-1) = vulnB_atg.col(gIdx).col(t-1).sum();
+      tmpN_at = tmpN_at * exp( - fracM * M_t(t-1) );
+      for(int a = 0; a < nA; a++)
+      {
+        vulnN_atg(a,t-1,gIdx) = tmpN_at(a) * sel_ag(a,gIdx);
+        vulnB_atg(a,t-1,gIdx) = vulnN_atg(a,t-1,gIdx)*wt(a);  
+        vulnB_tg(t-1,gIdx) += vulnB_atg(a,t-1,gIdx);
+      }
+      // vulnN_atg.col(gIdx).col(t-1) = tmpN_at * sel_ag;
+      // vulnB_atg.col(gIdx).col(t-1) = vulnN_atg.col(gIdx).col(t-1)*wt;
+      // vulnB_tg(t-1,gIdx) = vulnB_atg.col(gIdx).col(t-1).sum();
 
       // Caclulate proportion of each age in each fleet's 
       // vuln biomass
-      uAge_atg.col(gIdx).col(t-1) = vunB_atg.col(gIdx).col(t-1) / vulnB_tg(t-1,gIdx);
+      uAge_atg.col(gIdx).col(t-1) = vulnB_atg.col(gIdx).col(t-1) / vulnB_tg(t-1,gIdx);
 
       // Get numbers caught at age
       catAge_atg.col(gIdx).col(t-1) = uAge_atg.col(gIdx).col(t-1) * C_tg(t-1,gIdx) / wt;
@@ -347,15 +381,17 @@ Type objective_function<Type>::operator() ()
       for( int a = 0; a < nA; a++)
       {
         tmpN_at(a) -= catAge_atg(a,t-1,gIdx);
-        tmpN_at(a) =  posfun(tmpN_at(a), 1e-3, posPen );
+        Type tmpNum = tmpN_at(a);
+        tmpN_at(a) =  posfun(Type(tmpN_at(a)), Type(1e-3), posPen );
       }
+      prevTime = fleetTiming(gIdx);
     }
 
     // Finally, advance numbers at age
     // to the following time step by reducing
     // remaining numbers by the remaining mortality,
     // and adding recruitment
-    Type lastFrac = 1 - prevTime;
+    lastFrac = 1 - prevTime;
     for(int a = 0; a < nA; a++ )
     {
       // Recruitment
@@ -363,19 +399,20 @@ Type objective_function<Type>::operator() ()
       {
         N_at(a,t) = rec_a*SB_t(t-1)/( 1. + rec_b*SB_t(t-1) );
         if( t < nT )
-          N_at(a,t) *= exp(omegaR_t(t));
+          N_at(a,t) *= exp(omegaR_t(t-1));
+        R_t(t) = N_at(a,t);
       } else {
         // Depletion by lastFrac*Mt
-        N_at(a,t) = tmpN_at(a-1) * exp( - lastFrac * Mt(t-1))  
+        N_at(a,t) = tmpN_at(a-1) * exp( - lastFrac * M_t(t-1));  
         if( a == nA - 1)
-          N_at(nA-1,t) += tmpN_at(nA-1) * exp( - lastFrac * Mt(t-1))
+          N_at(nA-1,t) += tmpN_at(nA-1) * exp( - lastFrac * M_t(t-1));
       }
       // Convert to biomass
-      B_at(a,t) = N_at(a,t) * wt;
+      B_at(a,t) = N_at(a,t) * wt(a);
     }
 
     // Caclulate spawning biomass for next time step
-    SB_t(t) = sum(B_at.col(t) * mat);
+    SB_t(t) = (B_at.col(t) * mat).sum();
 
   } // End of population dynamics
   
@@ -386,9 +423,8 @@ Type objective_function<Type>::operator() ()
   lnqhat_g.fill(0.0);
   lntauObs_g.fill(0.0);
   z_tg.fill(0.0);
-  int t = 0; int gIdx = 0;
   // Loop over gear types
-  for( gIdx = 0; gIdx < nG; g++ )
+  for( int gIdx = 0; gIdx < nG; gIdx++ )
   {
     validObs = 0.;
     zSum = 0.;
@@ -396,8 +432,9 @@ Type objective_function<Type>::operator() ()
     // Check if this is a survey
     if( calcIndex_g(gIdx) == 1)
     {
+      Type idxState = 0.;
       // Loop over time steps
-      for( t = 0; t < nT; t++ )
+      for( int t = 0; t < nT; t++ )
       {
         if( I_tg(t,gIdx) > 0.0 )
         {
@@ -429,12 +466,17 @@ Type objective_function<Type>::operator() ()
       }
       // Calculate conditional MLE of observation
       // index variance
-      Type SSR = pow(z_tg.col(gIdx),2).sum();
+      // Sum squared resids
+      Type SSR = 0.;
+      for(int t = 0; t < nT; t++ )
+        SSR += square(z_tg(t,gIdx));
+      // concentrate obs error SD
       tauObs_g(gIdx) = sqrt(SSR/validObs);
 
       // Add concentrated nll value using cond MLE of tauObs
       obsIdxNLL += 0.5*(validObs * log( SSR / validObs ) + validObs);
     }
+
 
     // Age observations //
 
@@ -448,36 +490,45 @@ Type objective_function<Type>::operator() ()
     // change when renormalised by the sum, I think it's
     // better. It's also consistent with the modeling
     // choice of using a version of Pope's Approx
-
-    vector<Type> predPropAge(nA);
-    vector<Type> obsPropAge(nA);
+    
 
     // Loop over time steps
-    for( t = 0; t < nT; t++ )
+    for( int t = 0; t < nT; t++ )
     { 
+      Type         sumPropAge = 0.;
       // Now estimate predicted catch-at-age
       // This was done already if catch > 0, but 
       // not for all fleets (fishery indep. surveys
       // would be missed)
       // First, calculate prop at age in each fleet
-      predPropAge = vulnB_atg.col(gIdx).col(t) / vulnB_tg(t,gIdx);
-      // Convert to numbers
-      predPropAge /= wt;
+      for(int a = 0; a < nA; a++ )
+      {
+        predPA_atg(a,t,gIdx)   = uAge_atg(a,t,gIdx);
+        // Convert to numbers
+        predPA_atg(a,t,gIdx)  /= wt(a);  
+        sumPropAge            += predPA_atg(a,t,gIdx);
+      }
+      // predPropAge = vulnB_atg.col(gIdx).col(t) / vulnB_tg(t,gIdx);
+      // // Convert to numbers
+      // predPropAge /= wt;
       // Now renormalise to 
-      predPropAge /= predPropAge.sum();
+      // predPropAge /= predPropAge.sum();
+
       // Save to array
-      predPA_atg.col(gIdx).col(t) = predPropAge;
+      for( int a = 0; a < nA; a++ )
+        predPA_atg(a,t,gIdx) /= sumPropAge;
 
       // Check that age observations
       // exist by checking that the plus
       // group has observations
-      if( A_atg(nA,t,gIdx) > 0 )
-        for( int a=1; a<=nAges;a++ )
+      if( A_atg(nA-1,t,gIdx) >= 0 )
+        for( int a = 0; a < nA; a++ )
           if(A_atg(a,t,gIdx) >= 0)
           {
             // Robust normal approx. to multinomial likelihood from MULTIFAN-CL
-            ageObsNLL += log(2.*3.14*(predPropAge(a)*(1.-predPropAge(a))+0.1/nA));
-            ageObsNLL += log( exp( -effSampSize_g(gIdx)*pow( A_atg(a,t,gIdx)-predPropAge(a), 2. )/(2.*(1.-predPropAge(a))*predPropAge(a) +0.1/nA) )  +.01 );
+            Type tmpAgeResid = A_atg(a,t,gIdx) - predPA_atg(a,t,gIdx);
+            ageObsNLL += log(2.*3.14*(predPA_atg(a,t,gIdx)*(1.-predPA_atg(a,t,gIdx))+0.1/nA));
+            ageObsNLL += log( exp( -effSampleSize_g(gIdx)*pow( tmpAgeResid, 2. )/(2.*(1.-predPA_atg(a,t,gIdx))*predPA_atg(a,t,gIdx) +0.1/nA) )  +.01 );
           }
     }
     ageObsNLL *= (-0.5);
@@ -486,7 +537,8 @@ Type objective_function<Type>::operator() ()
   // Process error priors
   // Recruitment priors
   // Add recruitment deviations to rec NLL; sigmR is estimated
-  recNLL += 0.5*((nT - 1) * lnsigmaR + pow(omegaR_t,2).sum()/sigmaR/sigmaR);
+  for( int tIdx = 1; tIdx < nT; tIdx ++ )
+    recNLP += 0.5 * ( lnsigmaR + pow( omegaR_t(tIdx-1) / sigmaR, 2 ));
 
   // Now do a beta prior on steepness
   // Steepness prior pars passed in as a 2ple
@@ -498,14 +550,15 @@ Type objective_function<Type>::operator() ()
   Type aB             = tauB*muB; 
   Type bB             = tauB*(1.-muB); 
   Type steepness_nlp  = (-1.)*( (aB-1.)*log(ySteepness) + (bB-1.)*log(1.-ySteepness) );    
-  recNLL              += steepness_nlp;
+  recNLP              += steepness_nlp;
 
   // Add a recruitment var IG prior here?
 
   // Natural mortality prior
-  mortNLL += 0.5*pow(M-initMprior(0),2)/pow(initMPrior(1),2);
+  mortNLP += 0.5*pow( M - initMPrior(0), 2) / pow( initMPrior(1), 2 );
   // Mt deviations; sigmaM is estimated
-  mortNLL += 0.5*((nT - 1) * lnsigmaM + pow(omegaM_t,2).sum() / sigmaM / sigmaM);
+  for( int tIdx = 1; tIdx < nT; tIdx++ )
+    mortNLP += 0.5 * ( lnsigmaM + pow(omegaM_t(tIdx-1) / sigmaM, 2));
 
   // Add mortality var IG prior here?
   
@@ -513,16 +566,19 @@ Type objective_function<Type>::operator() ()
   objFun += posPenFactor * posPen;
 
   // Add NLL contributions to objFun
-  objFun += mortNLL + recNLL + obsIdxNLL + ageObsNLL;
+  objFun += mortNLP + recNLP + obsIdxNLL + ageObsNLL;
 
-  // Convert some values to log scale
-  // for sd reporting
+  // // Convert some values to log scale
+  // // for sd reporting
   vector<Type> lnSB_t       = log(SB_t);
   vector<Type> lnD_t        = log(SB_t) - lnB0;
   vector<Type> lnR_t        = log(R_t);
   vector<Type> lnM_t        = log(M_t);
-  array<Type>  lnF_tg       = log(F_tg);
-
+  // //arrays for ADREPORT
+  // array<Type>  lnF_tg(nT,nG);
+  // for( int tIdx = 0; tIdx < nT; tIdx ++ )
+  //   for( int gIdx = 0; gIdx < nT; gIdx ++ )
+  //     lnF_tg(tIdx,gIdx) = log(F_tg(tIdx,gIdx));
 
   /*\/\/\/\/\ REPORTING SECTION /\/\/\/\*/
   // Variables we want SEs for
@@ -530,6 +586,7 @@ Type objective_function<Type>::operator() ()
   ADREPORT(lnR_t);
   ADREPORT(lnM_t);
   ADREPORT(lnM);
+  // ADREPORT(lnF_tg);
   ADREPORT(lnqhat_g);
   ADREPORT(lnD_t);
   ADREPORT(logit_ySteepness);
@@ -537,13 +594,57 @@ Type objective_function<Type>::operator() ()
 
   
   // Everything else //
+
+  // Leading pars
+  REPORT(B0);
+  REPORT(M);
+  REPORT(initN_mult);
+  REPORT(rSteepness);
+  REPORT(sigmaM);
+  REPORT(sigmaR);
+
+  // Growth and maturity schedules
+  REPORT(mat);
+  REPORT(wt);
+  REPORT(len);
+  REPORT(age);
+  REPORT(surv);
+
+  // Model dimensions
+  REPORT(nT);
+  REPORT(nG);
+  REPORT(nA);
+
+  // Selectivity
+  REPORT(sel_ag);
+
+  // SR Variables
+  REPORT(R0);
+  REPORT(rec_a);
+  REPORT(rec_b);
+  REPORT(phi);
+
   // State variables
   REPORT(B_at);
   REPORT(N_at);
   REPORT(vulnB_tg);
+  REPORT(vulnB_atg);
+  REPORT(vulnN_atg);
   REPORT(SB_t);
+  REPORT(R_t);
   REPORT(M_t);
   REPORT(F_tg);
+
+  // Fleet reordering and 
+  // Pope's approx
+  REPORT(chronIdx);
+  REPORT(usedFleet);
+  REPORT(fleetTiming);
+  REPORT(uAge_atg);
+  REPORT(catAge_atg);
+  REPORT(predPA_atg);
+  REPORT(fracM);
+  REPORT(lastFrac);
   
   // Data
   REPORT(C_tg);
@@ -556,18 +657,27 @@ Type objective_function<Type>::operator() ()
   REPORT(initN_mult);
   
   // Observation model quantities
-  REPORT(qhat_os);
+  REPORT(qhat_g);
   REPORT(tauObs_g);
   REPORT(tauAge_g);
   REPORT(predPA_atg);
+  REPORT(z_tg);
+  REPORT(zSum);
+  REPORT(validObs);
+
+  // Priors
+  REPORT(muB);
+  REPORT(tauB);
+  REPORT(aB);
+  REPORT(bB);
 
   // Likelihood quantities
   REPORT(objFun);
   REPORT(ageObsNLL);
   REPORT(obsIdxNLL);
-  REPORT(recNLL);
-  REPORT(mortNLL);
-  REPORT(pospen);
+  REPORT(recNLP);
+  REPORT(mortNLP);
+  REPORT(posPen);
   
   return objFun;
 }
