@@ -108,7 +108,10 @@ plotFtg <- function( report = repFE, initYear = 1965, noPar = FALSE )
     mtext(side = 2, text = "Fishing Mortality (/yr)", line = 3)
 }
 
-plotSag <- function( report = repFE )
+
+# Selectivity at age for each gear
+plotSag <- function(  report = repFE,
+                      gearLabels = gearLabs )
 {
   # pull selectivity from report
   Sag     <- report$sel_ag
@@ -117,7 +120,79 @@ plotSag <- function( report = repFE )
   nA      <- report$nA
   nG      <- report$nG
 
-  # 
+  # Make plotting window
+  par(  mfrow = c(nG,1), 
+        oma = c(3,4,.1,.1), 
+        mar = c(2,1,1,1) )
+  # loop over gears
+  for( g in 1:nG )
+  {
+    plot( x = c(1,nA), y = c(0,1), type = "n",
+          axes = FALSE, xlab = "", ylab = "" )
+      axis( side = 1 )
+      axis( side = 2, las =1 )
+      box()
+      lines( x = 1:nA, y = Sag[,g], col = "grey30",
+              lwd = 3 )
+      panLab( x = 0.1, y = 0.9, txt = gearLabels[g] )
+  }
+  mtext( side = 1, text = "Age", outer = T, line = 1 )
+  mtext( side = 2, text = "Selectivity", outer = T, line = 2 )
+
+}
+
+# Vulnerable biomass
+plotIdxFits <- function(  report = repFE,
+                          gearLabels = gearLabs,
+                          initYear = 1965 )
+{
+  # Pull vulnerable biomass and indices
+  vulnBtg     <- report$vulnB_tg
+  vulnNtg     <- report$vulnN_tg
+  Itg         <- report$I_tg
+  qg          <- report$qhat_g
+
+  # Get survey type and whether
+  # idx is relative or absolute
+  surveyType  <- report$survType_g
+  indexType   <- report$indexType_g
+  calcIndex   <- report$calcIndex_g
+
+  # Model dimensions
+  nG          <- report$nG
+  nT          <- report$nT
+  surveyGears <- which(calcIndex == 1)
+
+  # replace missing indices with NAs
+  Itg[ Itg < 0 ] <- NA
+
+  par(  mfrow = c(length(surveyGears),1), 
+        oma = c(3,4,1,1),
+        mar = c(1,1,1,1) )
+
+  years <- seq(initYear, by = 1, length = nT + 1 )
+  vertLines <- seq(from = initYear, to = max(years), by = 10)
+
+
+  for( g in surveyGears )
+  {
+    if( surveyType[g] == 1 )
+      vulnTS <- vulnNtg[,g]
+    else vulnTS <- vulnBtg[,g]
+
+    plot( x = range(years), range(vulnTS),
+          xlab = "", ylab = "", type = "n",
+          axes = F )
+      axis(side = 1)
+      axis(side = 2, las = 1)
+      box()
+      lines( x = years[1:nT], y = vulnTS )
+      points( x = years[1:nT], y = Itg[,g]/qg[g] )
+      panLab( x = 0.9, y = 0.8, txt = gearLabels[g], cex = 2 )
+  }
+  mtext(  side = 1, text = "Year", outer = T )
+  mtext(  side = 2, text = "Vulnerable Biomass", outer = T, 
+          line = 2)
 }
 
 # Plot stock-recruitment curve
@@ -144,7 +219,7 @@ plotSR <- function( report = repFE )
   B20 <- 0.2*B0
   R20 <- rec.a * B20 / (1 + rec.b*B20)
 
-  plot( x = range(SB), y = range(R,Rt,na.rm = T ),
+  plot( x = range(SB), y = range(R,na.rm = T ),
         type = "n", las = 1, xlab = "",
         ylab = "")
     mtext( side = 1, text = "Spawning Biomass (kt)", line = 2.5)
@@ -166,7 +241,7 @@ plotSR <- function( report = repFE )
 
 }
 
-# recruitments, adjusted for brood year
+# recruitments
 plotRt <- function( report = repFE, initYear = 1965, noPar = FALSE )
 {
   # Pull stuff from report
@@ -237,6 +312,188 @@ plotRtResids <- function( report = repFE, initYear = 1965, noPar = FALSE )
                 lty = c(3),
                 lwd = c(2),
                 col = c("red") )
+}
+
+# Plot age fits
+plotAgeFitYrs <- function( report = repFE,
+                        initYear = 1965,
+                        gearLabels = gearLabs)
+{
+  # Pull predicted and observed ages
+  predAge <- report$predPA_atg
+  obsAge  <- report$A_atg
+
+  # Pull model dims
+  nG      <- report$nG
+  nT      <- report$nT
+  nA      <- report$nA
+
+  # Make colours vector
+  cols    <- brewer.pal( n = nG, "Dark2" )
+
+  # Make years vector
+  years   <- seq(initYear, length = nT+1, by = 1)
+
+  # Now, we want to loop over gear types now, 
+  # and record the gIdxes for which there are
+  # observations
+  ageGears <- c()
+  gearTimes <- vector(mode = "list", length = nG)
+  for( gIdx in 1:nG )
+  {
+    if( any(obsAge[1,,gIdx] >= 0) )
+    {
+      ageGears <- c(ageGears,gIdx)
+      gearTimes[[gIdx]] <- which(obsAge[1,,gIdx] >= 0)
+    }
+  }
+
+
+  # ok, ageGears are the ones we want to plot,
+  # and gearTimes is the list of time indices
+  for( gIdx in ageGears )
+  {
+    dev.new()
+    times <- gearTimes[[gIdx]]
+    # Count the number of age observations
+    # there are, and make the plotting window
+    nObs <- length(times)
+    nCols <- round(sqrt(nObs))
+    nRows <- ceiling(nObs/nCols)
+
+    par(  mfcol = c(nRows,nCols), 
+          mar = c(1,1,1,1),
+          oma = c(3,3,3,3) )
+
+    for( tIdx in times )
+    { 
+      # get age obs and preds
+      ageObs  <- obsAge[,tIdx,gIdx]
+      agePred <- predAge[,tIdx,gIdx]
+
+      plot( x = c(1,nA), y = c(0,max(ageObs,agePred,na.rm = T) ),
+            xlab = "", ylab = "", type = "n", las = 1 )
+        rect( xleft = 1:nA - .3, xright = 1:nA + .3,
+              ybottom = 0, ytop = ageObs,
+              col = "grey40", border = NA )
+        lines(  x = 1:nA, y = agePred, lwd = 1,
+                col = cols[gIdx] )
+        points(  x = 1:nA, y = agePred,
+                col = cols[gIdx], pch = 21 )
+        panLab( x=.5, y = .95, txt = years[tIdx] )
+
+    }
+    mtext( side = 1, outer = T, text = "Age", line = 2 )
+    mtext( side = 2, outer = T, text = "Proportion", line = 2 )
+  }
+
+}
+
+
+# Calculate age obs likelihood out here for model debugging
+calcAgeObsLike <- function( report = repFE,
+                            gearLabels = gearLabs )
+{
+  # Pull predicted and observed ages
+  predAge <- report$predPA_atg
+  obsAge  <- report$A_atg
+  # replace missing entries with NAs
+  predAge[predAge < 0] <- NA
+  obsAge[obsAge < 0] <- NA
+
+  # Pull model dims
+  nG      <- report$nG
+  nT      <- report$nT
+  nA      <- report$nA
+
+  # # Now, we want to loop over gear types now, 
+  # # and record the gIdxes for which there are
+  # # observations
+  # ageGears <- c()
+  # gearTimes <- vector(mode = "list", length = nG)
+  # for( gIdx in 1:nG )
+  # {
+  #   if( any(obsAge[1,,gIdx] >= 0) )
+  #   {
+  #     ageGears <- c(ageGears,gIdx)
+  #     gearTimes[[gIdx]] <- which(obsAge[1,,gIdx] >= 0)
+  #   }
+  # }
+
+  # make an array to hold the components of the calcs
+  ageResids   <- predAge - obsAge
+  agePropVar  <- predAge * (1 - predAge)
+  ageObsNLL   <- 0.5 * log(2 * pi *( agePropVar + .1/nA) )
+  ageObsNLL   <- ageObsNLL - log( exp( -100 * ageResids^2/(2*(agePropVar + .1/nA) ) ) +.01 )
+  ageObsNLL_g <- apply(X = ageObsNLL, FUN = sum, na.rm = T, MARGIN = c(3))
+  
+  return(list(  ageResids = ageResids,
+                agePropVar = agePropVar,
+                ageObsNLL = ageObsNLL,
+                ageObsNLL_g = ageObsNLL_g ) )
+}
+
+# Plot age fits averaged over time
+plotAgeFitAvg <- function(  report = repFE,
+                            initYear = 1965,
+                            gearLabels = gearLabs)
+{
+  # Pull predicted and observed ages
+  predAge <- report$predPA_atg
+  obsAge  <- report$A_atg
+
+  # replace missing entries with NAs
+  predAge[predAge < 0] <- NA
+  obsAge[obsAge < 0] <- NA
+  
+  # Average over time
+  predAge <- apply( X = predAge, FUN = mean, MARGIN = c(1,3), na.rm = T )
+  obsAge <- apply( X = obsAge, FUN = mean, MARGIN = c(1,3), na.rm = T )    
+
+  # Pull model dims
+  nG      <- report$nG
+  nA      <- report$nA
+
+  # Make colours vector
+  cols    <- brewer.pal( n = nG, "Dark2" )
+
+  # Make years vector
+  years   <- seq(initYear, length = nT+1, by = 1)
+
+  # Now, we want to loop over gear types now, 
+  # and record the gIdxes for which there are
+  # observations
+  ageGears <- c()
+  gearTimes <- vector(mode = "list", length = nG)
+  for( gIdx in 1:nG )
+    if( any(!is.na(obsAge[1,gIdx]) ) )
+      ageGears <- c(ageGears,gIdx)
+
+  par(  mfcol = c(length(ageGears),1), 
+        mar = c(1,1,1,1),
+        oma = c(3,3,3,3) )
+
+  # ok, ageGears are the ones we want to plot,
+  for( gIdx in ageGears )
+  {
+    # get age obs and preds
+    ageObs  <- obsAge[,gIdx]
+    agePred <- predAge[,gIdx]
+
+    plot( x = c(1,nA), y = c(0,max(ageObs,agePred,na.rm = T) ),
+          xlab = "", ylab = "", type = "n", las = 1 )
+      rect( xleft = 1:nA - .3, xright = 1:nA + .3,
+            ybottom = 0, ytop = ageObs,
+            col = "grey40", border = NA )
+      lines(  x = 1:nA, y = agePred, lwd = 3,
+              col = cols[gIdx] )
+      points(  x = 1:nA, y = agePred,
+              col = cols[gIdx], pch = 16, cex = 1.5 )
+      panLab( x=.5, y = .95, txt = gearLabels[gIdx] )
+  }
+  mtext( side = 1, outer = T, text = "Age", line = 2 )
+  mtext( side = 2, outer = T, text = "Proportion", line = 2 )
+
 }
 
 # plotBtDat <- function(  report = repFE, initYear = 1965, noPar = FALSE,

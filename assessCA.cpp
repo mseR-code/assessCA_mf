@@ -102,7 +102,6 @@ Type objective_function<Type>::operator() ()
   // Selectivity
   PARAMETER_VECTOR(lnSelAlpha_g);       // log scale selectivity alpha par (ageSel50 or gamma shape par)
   PARAMETER_VECTOR(lnSelBeta_g);        // log scale selectivity beta par (ageSel95 or gamma scale par)
-  PARAMETER_VECTOR(lntauAge_g);         // Age observation sampling error log-SD
   PARAMETER_VECTOR(effSampleSize_g);    // Effetive sample size for age obs likelihood
 
   // Survey obs error and catchabilities are
@@ -115,14 +114,14 @@ Type objective_function<Type>::operator() ()
   PARAMETER(lnsigmaM);                  // log scale natural mortality SD
 
   // Priors //
-  PARAMETER_VECTOR(agetau2IGa);         // Inverse Gamma Prior alpha for age sampling error var prior
-  PARAMETER_VECTOR(agetau2IGb);         // Inverse Gamma Prior beta for age sampling error var prior
   PARAMETER_VECTOR(obstau2IGa);         // Inverse Gamma Prior alpha for stock index obs error var prior
   PARAMETER_VECTOR(obstau2IGb);         // Inverse Gamma Prior beta for stock index obs error var prior
   PARAMETER_VECTOR(sig2RPrior);         // Hyperparameters for sig2R prior - (IGa,IGb) or (mean,var)
   PARAMETER_VECTOR(sig2MPrior);         // Hyperparameters for sig2M prior - (IGa,IGb) or (mean,var)
   PARAMETER_VECTOR(rSteepBetaPrior);    // pars for Beta dist steepness prior
   PARAMETER_VECTOR(initMPrior);         // pars for initial M prior (mean,sd)
+  PARAMETER_VECTOR(mq);                 // prior mean catchability 
+  PARAMETER_VECTOR(sdq);                 // prior mean catchability 
 
   // Fixed LH parameters
   PARAMETER_VECTOR( aMat );             // Maturity ogive parameters (ages at 50% and 95% mature)
@@ -130,6 +129,9 @@ Type objective_function<Type>::operator() ()
   PARAMETER( L1 );                      // Length at age 1
   PARAMETER( vonK );                    // vonB growth rate
   PARAMETER_VECTOR( lenWt );            // Allometric length/weight c1, c2 parameters
+
+  // Max selectivity age
+  PARAMETER_VECTOR(maxSelAge);          // age at max selectivity, used as a prior mean
   
   
 
@@ -145,7 +147,6 @@ Type objective_function<Type>::operator() ()
   // Transformed parameter vectors
   vector<Type> SelAlpha_g   = exp(lnSelAlpha_g);
   vector<Type> SelBeta_g    = exp(lnSelBeta_g);
-  vector<Type> tauAge_g     = exp(lntauAge_g);
   vector<Type> initN_mult   = exp(log_initN_mult);
 
   // Stock recruit model
@@ -156,16 +157,26 @@ Type objective_function<Type>::operator() ()
 
   // Recruitment devs
   vector<Type> omegaR_t(nT);
+  omegaR_t.fill(0.0);
   for(int t = firstRecDev-1; t < nT; t++)
     omegaR_t(t) = recDevs_t(t - firstRecDev + 1);
 
   // Optimisation and modeling quantities
-  Type objFun = 0.;             // Objective function
-  Type posPen = 0.;             // posFun penalty
-  Type obsIdxNLL = 0.;          // observation indices NLL
-  Type ageObsNLL = 0.;          // Age observation NLL
-  Type recNLP = 0.;             // recruitment deviations NLL
-  Type mortNLP = 0.;            // Mt devations NLL
+  Type objFun = 0.;                 // Objective function
+  Type posPen = 0.;                 // posFun penalty
+  Type recNLP = 0.;                 // recruitment deviations NLL
+  Type mortNLP = 0.;                // Mt devations NLL
+  Type qNLP = 0.0;                  // q neg log prior density
+  vector<Type>  selNLP_g(nG);       // Selectivity NLP
+  vector<Type>  obsIdxNLL_g(nG);    // observation indices NLL
+  vector<Type>  ageObsNLL_g(nG);    // Age observation NLL
+  vector<Type>  nlptau2idx_g(nG);   // Observation error var prior
+
+  // Initialise vectors at 0
+  obsIdxNLL_g.fill(0.0);
+  ageObsNLL_g.fill(0.0);
+  nlptau2idx_g.fill(0.0);
+  selNLP_g.fill(0.0);
 
 
   // Life schedules
@@ -176,7 +187,10 @@ Type objective_function<Type>::operator() ()
   array<Type>   surv(nA);
 
   // Selectivity values
-  array<Type>   sel_ag(nA,nG);   
+  array<Type>   sel_ag(nA,nG);  
+  // Get max sel age
+  vector<Type>  selModeAge_g(nG);
+  selModeAge_g.fill(0.); 
 
   // State variables
   array<Type>   N_at(nA,nT+1);          // Numbers at age
@@ -184,6 +198,7 @@ Type objective_function<Type>::operator() ()
   array<Type>   vulnB_atg(nA,nT,nG);    // Vulnerable biomass at age by gear
   array<Type>   vulnB_tg(nT,nG);        // Vulnerable biomass by gear
   array<Type>   vulnN_atg(nA,nT,nG);    // Vulnerable numbers at age by gear
+  array<Type>   vulnN_tg(nT,nG);        // Vulnerable numbers by gear
   vector<Type>  SB_t(nT+1);             // Spawning biomass
   vector<Type>  R_t(nT+1);              // Recruitments
   vector<Type>  M_t(nT+1);              // Natural mortality vector
@@ -198,15 +213,31 @@ Type objective_function<Type>::operator() ()
   vector<Type>  projExpBio;     // Projected exploitable biomass
 
   // Observation model quantities
-  Type          zSum;           // sum of log(It/Bt)
-  Type          validObs;       // Number of observations
+  vector<Type>  zSum_g(nG);     // sum of log(It/Bt)
+  vector<int>   validObs_g(nG); // Number of observations
   array<Type>   z_tg(nT,nG);    // array to hold residuals for NLL calc
+  vector<Type>  SSR_g(nG);      // sum of squared resids
 
   // Conditional MLEs for survey observations
-  vector<Type> lnqhat_g(nG);    // log scale q_g
-  vector<Type> qhat_g(nG);      // natural scale
-  vector<Type> lntauObs_g(nG);  // log scale obs err SD
-  vector<Type> tauObs_g(nG);    // obs err SD
+  vector<Type>  lnqhat_g(nG);   // log scale q_g
+  vector<Type>  qhat_g(nG);     // natural scale
+  vector<Type>  lntauObs_g(nG); // log scale obs err SD
+  vector<Type>  tauObs_g(nG);   // obs err SD
+
+  // Initialise all arrays at 0
+  N_at.fill(0.0);
+  B_at.fill(0.0);
+  vulnB_atg.fill(0.0);
+  vulnB_tg.fill(0.0);
+  vulnN_atg.fill(0.0);
+  vulnN_tg.fill(0.0);
+  SB_t.fill(0.0);
+  R_t.fill(0.0);
+  M_t.fill(0.0);
+  F_tg.fill(0.0);
+  uAge_atg.fill(0.0);
+  catAge_atg.fill(0.0);
+  predPA_atg.fill(-1);
 
 
   /*\/\/\/\/\ PROCEDURE SECTION /\/\/\/\*/
@@ -230,7 +261,6 @@ Type objective_function<Type>::operator() ()
   for( int t = 1; t < nT; t++ )
     M_t(t) = M_t(t-1)*exp(omegaM_t(t-1));
 
-
   // Calculate selectivity
   for( int g = 0; g < nG; g++ )
   {
@@ -239,19 +269,23 @@ Type objective_function<Type>::operator() ()
     {
       // asymptotic
       Type aSel50   = SelAlpha_g(g);
-      Type aSel95   = SelBeta_g(g);
+      Type aSel95   = SelAlpha_g(g) + SelBeta_g(g);
       Type tmp      = log(19.)/( aSel95 - aSel50 );
       for( int a = 0; a < nA; a++ )
         sel_ag(a,g) = 1./( 1. + exp(-tmp*( Type(age(a)) - aSel50 ) ) );
+
+      selModeAge_g(g) = aSel95;
     }
 
     if( selType_g(g) == 1)
     {
-      // domed (un-normalised gamma - or maybe normal ??)
-      Type dSelAlpha  = SelAlpha_g(g);
-      Type dSelBeta   = SelBeta_g(g);
+      // domed Normal selectivity
+      Type nSelMean = SelAlpha_g(g);
+      Type nSelSD   = SelBeta_g(g);
       for( int a = 0; a < nA; a++)
-        sel_ag(a,g)   = pow( age(a) * dSelBeta / (dSelAlpha - 1), dSelAlpha-1 ) * exp ( dSelAlpha - 1 - age(a) * dSelBeta );
+        sel_ag(a,g) = exp(-1. * square((age(a) - nSelMean)/nSelSD) );
+
+      selModeAge_g(g) = nSelMean;
     }    
   }
 
@@ -323,6 +357,7 @@ Type objective_function<Type>::operator() ()
   SB_t(0) = sum(B_at.col(0) * mat);
   R_t(0)  = N_at(0,0);
 
+  // Initialise fleet timing M fracs
   Type fracM = 0.;
   Type lastFrac = 0.;
 
@@ -350,25 +385,25 @@ Type objective_function<Type>::operator() ()
         vulnN_atg(a,t-1,gIdx) = tmpN_at(a) * sel_ag(a,gIdx);
         vulnB_atg(a,t-1,gIdx) = vulnN_atg(a,t-1,gIdx)*wt(a);  
         vulnB_tg(t-1,gIdx) += vulnB_atg(a,t-1,gIdx);
+        vulnN_tg(t-1,gIdx) += vulnN_atg(a,t-1,gIdx);
       }
-      // vulnN_atg.col(gIdx).col(t-1) = tmpN_at * sel_ag;
-      // vulnB_atg.col(gIdx).col(t-1) = vulnN_atg.col(gIdx).col(t-1)*wt;
-      // vulnB_tg(t-1,gIdx) = vulnB_atg.col(gIdx).col(t-1).sum();
 
-      // Caclulate proportion of each age in each fleet's 
-      // vuln biomass
-      uAge_atg.col(gIdx).col(t-1) = vulnB_atg.col(gIdx).col(t-1) / vulnB_tg(t-1,gIdx);
+      for(int a = 0; a < nA; a ++ )
+      {
+        // Caclulate proportion of each age in each fleet's 
+        // vuln biomass to converte catch to numbers
+        uAge_atg(a,t-1,gIdx) = vulnB_atg(a,t-1,gIdx) / vulnB_tg(t-1,gIdx);
 
-      // Get numbers caught at age
-      catAge_atg.col(gIdx).col(t-1) = uAge_atg.col(gIdx).col(t-1) * C_tg(t-1,gIdx) / wt;
-
+        // Get numbers caught at age
+        catAge_atg(a,t-1,gIdx) = uAge_atg(a,t-1,gIdx) * C_tg(t-1,gIdx) / wt(a);
+      }
       // Calculate F - there might be a better way here...
       // Read MacCall's paper on alternatives to Pope's approx
       // Question is: what do we use for estimating F? Just U? Crank this
       // on paper first.
       // Pope's approx works better within a single age class, or
       // with DD models (F = log(Nt/Nt-1)-M)
-      F_tg(t-1,gIdx) = - log( 1 - C_tg(t-1, gIdx) / vulnB_tg(t-1,gIdx) );
+      F_tg(t-1,gIdx) = C_tg(t-1, gIdx) / vulnB_tg(t-1,gIdx) ;
 
       // Remove numbers from the total population
       // SimulFleets //
@@ -411,7 +446,7 @@ Type objective_function<Type>::operator() ()
       B_at(a,t) = N_at(a,t) * wt(a);
     }
 
-    // Caclulate spawning biomass for next time step
+    // Caclulate spawning biomass at beginning of next time step
     SB_t(t) = (B_at.col(t) * mat).sum();
 
   } // End of population dynamics
@@ -423,11 +458,12 @@ Type objective_function<Type>::operator() ()
   lnqhat_g.fill(0.0);
   lntauObs_g.fill(0.0);
   z_tg.fill(0.0);
+  zSum_g.fill(0.0);
+  validObs_g.fill(0.0);
   // Loop over gear types
   for( int gIdx = 0; gIdx < nG; gIdx++ )
   {
-    validObs = 0.;
-    zSum = 0.;
+    validObs_g(gIdx) = int(0);
     // Stock indices (concentrate obs error var and lnq)
     // Check if this is a survey
     if( calcIndex_g(gIdx) == 1)
@@ -447,8 +483,8 @@ Type objective_function<Type>::operator() ()
           // Calculate residual
           z_tg(t,gIdx) = log(I_tg(t,gIdx)) - log(idxState);
           // Add to sum of residuals
-          zSum += z_tg(t,gIdx);
-          validObs += 1;
+          zSum_g(gIdx) += z_tg(t,gIdx);
+          validObs_g(gIdx) += int(1);
         }
       }
       // Calculate conditional MLE of q
@@ -456,7 +492,7 @@ Type objective_function<Type>::operator() ()
       if( indexType_g(gIdx) == 0 )
       {
         // mean residual is lnq (intercept)
-        lnqhat_g(gIdx) = zSum / validObs;
+        lnqhat_g(gIdx) = zSum_g(gIdx) / validObs_g(gIdx);
 
         // Subtract mean from residuals for
         // inclusion in likelihood
@@ -467,14 +503,14 @@ Type objective_function<Type>::operator() ()
       // Calculate conditional MLE of observation
       // index variance
       // Sum squared resids
-      Type SSR = 0.;
+      SSR_g(gIdx) = 0.;
       for(int t = 0; t < nT; t++ )
-        SSR += square(z_tg(t,gIdx));
+        SSR_g(gIdx) += square(z_tg(t,gIdx));
       // concentrate obs error SD
-      tauObs_g(gIdx) = sqrt(SSR/validObs);
+      tauObs_g(gIdx) = sqrt(SSR_g(gIdx)/validObs_g(gIdx));
 
       // Add concentrated nll value using cond MLE of tauObs
-      obsIdxNLL += 0.5*(validObs * log( SSR / validObs ) + validObs);
+      obsIdxNLL_g(gIdx) += 0.5*(validObs_g(gIdx) * log( SSR_g(gIdx) / validObs_g(gIdx) ) + validObs_g(gIdx));
     }
 
 
@@ -495,64 +531,63 @@ Type objective_function<Type>::operator() ()
     // Loop over time steps
     for( int t = 0; t < nT; t++ )
     { 
-      Type         sumPropAge = 0.;
-      // Now estimate predicted catch-at-age
-      // This was done already if catch > 0, but 
-      // not for all fleets (fishery indep. surveys
-      // would be missed)
-      // First, calculate prop at age in each fleet
-      for(int a = 0; a < nA; a++ )
-      {
-        predPA_atg(a,t,gIdx)   = uAge_atg(a,t,gIdx);
-        // Convert to numbers
-        predPA_atg(a,t,gIdx)  /= wt(a);  
-        sumPropAge            += predPA_atg(a,t,gIdx);
-      }
-      // predPropAge = vulnB_atg.col(gIdx).col(t) / vulnB_tg(t,gIdx);
-      // // Convert to numbers
-      // predPropAge /= wt;
-      // Now renormalise to 
-      // predPropAge /= predPropAge.sum();
-
-      // Save to array
-      for( int a = 0; a < nA; a++ )
-        predPA_atg(a,t,gIdx) /= sumPropAge;
-
       // Check that age observations
       // exist by checking that the plus
       // group has observations
       if( A_atg(nA-1,t,gIdx) >= 0 )
+      {
+        Type         sumPropAge = 0.;
+        // Now estimate predicted catch-at-age
+        // This was done already if catch > 0, but 
+        // not for all fleets (fishery indep. surveys
+        // would be missed)
+        // First, calculate prop at age in each fleet
+        for(int a = 0; a < nA; a++ )
+        {
+          predPA_atg(a,t,gIdx)   = uAge_atg(a,t,gIdx);
+          // Convert to numbers
+          predPA_atg(a,t,gIdx)  /= wt(a);  
+          sumPropAge            += predPA_atg(a,t,gIdx);
+        }
+        // predPropAge = vulnB_atg.col(gIdx).col(t) / vulnB_tg(t,gIdx);
+        // // Convert to numbers
+        // predPropAge /= wt;
+        // Now renormalise to 
+        // predPropAge /= predPropAge.sum();
+
+        // Save to array
+        for( int a = 0; a < nA; a++ )
+          predPA_atg(a,t,gIdx) /= sumPropAge;
+
         for( int a = 0; a < nA; a++ )
           if(A_atg(a,t,gIdx) >= 0)
           {
             // Robust normal approx. to multinomial likelihood from MULTIFAN-CL
-            Type tmpAgeResid = A_atg(a,t,gIdx) - predPA_atg(a,t,gIdx);
-            ageObsNLL += log(2.*3.14*(predPA_atg(a,t,gIdx)*(1.-predPA_atg(a,t,gIdx))+0.1/nA));
-            ageObsNLL += log( exp( -effSampleSize_g(gIdx)*pow( tmpAgeResid, 2. )/(2.*(1.-predPA_atg(a,t,gIdx))*predPA_atg(a,t,gIdx) +0.1/nA) )  +.01 );
+            Type tmpAgeResid      = A_atg(a,t,gIdx) - predPA_atg(a,t,gIdx);
+            Type tmpAgePropVar    = predPA_atg(a,t,gIdx)*(1.-predPA_atg(a,t,gIdx));
+            Type tmpNormalKernel  = -1. * effSampleSize_g(gIdx) * square(tmpAgeResid)/(2.*(tmpAgePropVar + 0.1/nA));
+            ageObsNLL_g(gIdx) -= - 0.5 * log(2.*3.14*(tmpAgePropVar+0.1/nA));            
+            ageObsNLL_g(gIdx) -= log( exp( tmpNormalKernel )  +.01 );
           }
+      }
     }
-    ageObsNLL *= (-0.5);
   }
 
   // Process error priors
   // Recruitment priors
   // Add recruitment deviations to rec NLL; sigmR is estimated
-  for( int tIdx = 1; tIdx < nT; tIdx ++ )
-    recNLP += 0.5 * ( lnsigmaR + pow( omegaR_t(tIdx-1) / sigmaR, 2 ));
+  for( int tIdx = firstRecDev - 1; tIdx < nT; tIdx ++ )
+    recNLP += 0.5 * ( lnsigmaR + pow( recDevs_t(tIdx - firstRecDev + 1) / sigmaR, 2 ));
 
   // Now do a beta prior on steepness
   // Steepness prior pars passed in as a 2ple
   // of mean and sd, use moment matching to convert
   // to beta parameters. There's some scaling here
   // I don't fully understand, requires some thought
-  Type muB            = 1.3*rSteepBetaPrior(0)-0.3;
-  Type tauB           = muB*(1.-muB)/( 1.5625*pow(rSteepBetaPrior(1),2) )-1.; 
-  Type aB             = tauB*muB; 
-  Type bB             = tauB*(1.-muB); 
-  Type steepness_nlp  = (-1.)*( (aB-1.)*log(ySteepness) + (bB-1.)*log(1.-ySteepness) );    
-  recNLP              += steepness_nlp;
+  Type steepness_nlp  = (1 - rSteepBetaPrior(0)) * log(rSteepness) + (1 - rSteepBetaPrior(1)) * log(1-rSteepness);
 
-  // Add a recruitment var IG prior here?
+  // Add a recruitment var IG prior
+  Type sig2RNLP = (sig2RPrior(0)+Type(1))*2*lnsigmaR + sig2RPrior(1)/square(sigmaR);
 
   // Natural mortality prior
   mortNLP += 0.5*pow( M - initMPrior(0), 2) / pow( initMPrior(1), 2 );
@@ -560,13 +595,36 @@ Type objective_function<Type>::operator() ()
   for( int tIdx = 1; tIdx < nT; tIdx++ )
     mortNLP += 0.5 * ( lnsigmaM + pow(omegaM_t(tIdx-1) / sigmaM, 2));
 
-  // Add mortality var IG prior here?
+  // Add mortality var IG prior
+  Type sig2MNLP = (sig2MPrior(0)+Type(1))*2*lnsigmaM + sig2MPrior(1)/square(sigmaM);
+
+  // Add gear-wise priors:
+  // Catchability, index obs error variance,
+  // and a prior on selectivity pars
+  qhat_g = exp(lnqhat_g);
+  for( int gIdx = 0; gIdx < nG; gIdx++ )
+  {
+    qNLP += .5* square( ( qhat_g(gIdx) - mq(gIdx) ) / sdq(gIdx) );  
+    // IG prior on survey obs err variance
+    if( calcIndex_g(gIdx) == 1 )
+      nlptau2idx_g(gIdx) += (obstau2IGa(gIdx)+Type(1))*2*log(tauObs_g(gIdx)) + obstau2IGb(gIdx)/square(tauObs_g(gIdx));
+  }
+
+  
+
+
   
   // Add positive function penalty to objFun
   objFun += posPenFactor * posPen;
 
-  // Add NLL contributions to objFun
-  objFun += mortNLP + recNLP + obsIdxNLL + ageObsNLL;
+  // Add NLL and NLP contributions to objFun
+  objFun += mortNLP + 
+            recNLP + 
+            steepness_nlp +
+            obsIdxNLL_g.sum() + 
+            ageObsNLL_g.sum() + 
+            qNLP + 
+            nlptau2idx_g.sum();
 
   // // Convert some values to log scale
   // // for sd reporting
@@ -596,12 +654,12 @@ Type objective_function<Type>::operator() ()
   // Everything else //
 
   // Leading pars
-  REPORT(B0);
-  REPORT(M);
-  REPORT(initN_mult);
-  REPORT(rSteepness);
-  REPORT(sigmaM);
-  REPORT(sigmaR);
+  REPORT(B0);                 // Unfished biomass
+  REPORT(M);                  // Initial/constant natural mortality
+  REPORT(initN_mult);         // Initial numbers multiplier (fished)
+  REPORT(rSteepness);         // Steepness
+  REPORT(sigmaM);             // Mt devations sd
+  REPORT(sigmaR);             // Recruitment deviations SD
 
   // Growth and maturity schedules
   REPORT(mat);
@@ -617,6 +675,9 @@ Type objective_function<Type>::operator() ()
 
   // Selectivity
   REPORT(sel_ag);
+  REPORT(SelAlpha_g);
+  REPORT(SelBeta_g);
+  REPORT(selModeAge_g);
 
   // SR Variables
   REPORT(R0);
@@ -629,6 +690,7 @@ Type objective_function<Type>::operator() ()
   REPORT(N_at);
   REPORT(vulnB_tg);
   REPORT(vulnB_atg);
+  REPORT(vulnN_tg);
   REPORT(vulnN_atg);
   REPORT(SB_t);
   REPORT(R_t);
@@ -645,6 +707,13 @@ Type objective_function<Type>::operator() ()
   REPORT(predPA_atg);
   REPORT(fracM);
   REPORT(lastFrac);
+
+  // Data switches
+  REPORT(survType_g);     // Type of index (0 = vuln bio, 1 = vuln numbers)
+  REPORT(indexType_g);    // Type of survey (0 = relative, 1 = absolute)
+  REPORT(calcIndex_g);    // Calculate fleet index (0 = no, yes = 1)
+  REPORT(selType_g);      // Type of selectivity (0 = asymptotic, 1 = domed (normal))
+
   
   // Data
   REPORT(C_tg);
@@ -654,29 +723,29 @@ Type objective_function<Type>::operator() ()
   // Random effects
   REPORT(omegaM_t);
   REPORT(omegaR_t);
+  REPORT(recDevs_t);
   REPORT(initN_mult);
   
   // Observation model quantities
   REPORT(qhat_g);
   REPORT(tauObs_g);
-  REPORT(tauAge_g);
   REPORT(predPA_atg);
   REPORT(z_tg);
-  REPORT(zSum);
-  REPORT(validObs);
+  REPORT(zSum_g);
+  REPORT(validObs_g);
+  REPORT(SSR_g);
 
-  // Priors
-  REPORT(muB);
-  REPORT(tauB);
-  REPORT(aB);
-  REPORT(bB);
-
-  // Likelihood quantities
+  // Likelihood/prior values
   REPORT(objFun);
-  REPORT(ageObsNLL);
-  REPORT(obsIdxNLL);
+  REPORT(ageObsNLL_g);
+  REPORT(obsIdxNLL_g);
   REPORT(recNLP);
   REPORT(mortNLP);
+  REPORT(qNLP);
+  REPORT(sig2MNLP);
+  REPORT(sig2RNLP);
+  REPORT(nlptau2idx_g);
+  REPORT(steepness_nlp);
   REPORT(posPen);
   
   return objFun;

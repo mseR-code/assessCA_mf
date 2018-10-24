@@ -38,6 +38,8 @@ ages  <- lisread("opModAges.dat")
 catch <- lisread("opModCatch.dat")
 idx   <- lisread("opModIndex.dat")
 
+gearLabs <- c("Trap", "Hook", "Trawl", "Std.", "StRS")
+
 nT    <- 54
 
 # Put data into correct shape
@@ -57,6 +59,8 @@ for(g in 1:5)
       A_atg[1,t,g] <- 0
 
 firstRecDev <- 10
+tauObs  <- c(0.157338,1,1,0.510473,0.163557)
+tau2Obs <- tauObs^2
 
 dat <- list(  I_tg = I_tg,
               C_tg = C_tg,
@@ -64,51 +68,50 @@ dat <- list(  I_tg = I_tg,
               survType_g = c(1,-1,-1,1,1),
               indexType_g = c(0,-1,-1,0,0),
               calcIndex_g = c(1,0,0,1,1),
-              selType_g = c(0,0,0,0,0),
+              selType_g = c(0,0,1,0,0),
               fleetTiming = c(.49,.5,.51,.74,.76),
               initCode = c(0),
-              posPenFactor = c(1e3),
+              posPenFactor = c(1e4),
               firstRecDev = firstRecDev )
 
-par <- list(  lnB0 = 4,
-              logit_ySteepness = 0,
+par <- list(  lnB0 = 6,
+              logit_ySteepness = 3,
               lnM = -2.7,
               log_initN_mult = rep(0,35),
-              lnSelAlpha_g = rep(1.6,5),
-              lnSelBeta_g = rep(2.4,5),
+              lnSelAlpha_g = c(1.6,1.6,1.09,1.6,1.6),
+              lnSelBeta_g = c(2,2,0.5,2,2),
               lntauAge_g = rep(-1.6,5),
               effSampleSize_g = rep(100,5),
               recDevs_t = rep(0,nT-firstRecDev + 1 ),
               lnsigmaR = 0,
               omegaM_t = rep(0,nT-1),
               lnsigmaM = -1,
-              agetau2IGa = rep(1,5),
-              agetau2IGb = rep(0.04,5),
               obstau2IGa = rep(1,5),
-              obstau2IGb = rep(0.04,5),
+              obstau2IGb = 2*tau2Obs,
               sig2RPrior = c(1,2),
               sig2MPrior = c(1,0.04),
-              rSteepBetaPrior = c(.55,.005),
+              rSteepBetaPrior = c(22,18),
               initMPrior = c(.06,.006),
+              mq = c(0.395296,1,1,0.294597,0.752047),
+              sdq = c(0.395296,1,1,0.294597,0.752047)/3,
               aMat = c(5,12),
               Linf = c(70),
               L1 = c(32.5),
               vonK = c(.275),
-              lenWt = c(1.04e-5,3.07))
+              lenWt = c(1.04e-5,3.07),
+              maxSelAge = c(5,5,2,3,3))
 
 
 map <- list(  # lnB0 =factor(NA),
               # logit_ySteepness = factor(NA),
               # lnM = factor(NA),
               log_initN_mult = factor(rep(NA,35)),
-              #lnSelAlpha_g = factor(rep(NA,5)),
-              #lnSelBeta_g = factor(rep(NA,5)),
-              #recDevs_t = factor(rep(NA,nT-firstRecDev + 1)),
+              lnSelAlpha_g = factor(c(1,NA,NA,2,3)),
+              lnSelBeta_g = factor(c(1,NA,NA,2,3)),
+              # recDevs_t = factor(rep(NA,nT-firstRecDev + 1)),
               lnsigmaR = factor(NA),
               omegaM_t = factor(rep(NA,nT-1)),
               lnsigmaM = factor(NA),
-              agetau2IGa = factor(rep(NA,5)),
-              agetau2IGb = factor(rep(NA,5)),
               obstau2IGa = factor(rep(NA,5)),
               obstau2IGb = factor(rep(NA,5)),
               sig2RPrior = factor(c(NA,NA)),
@@ -119,7 +122,8 @@ map <- list(  # lnB0 =factor(NA),
               Linf = factor(c(NA)),
               L1 = factor(c(NA)),
               vonK = factor(c(NA)),
-              lenWt = factor(c(NA,NA)) )
+              lenWt = factor(c(NA,NA)),
+              maxSelAge = factor(rep(NA,5)) )
 
 
 
@@ -136,5 +140,21 @@ fitFE <- try( nlminb (  start     = objFE$par,
                         control   = ctrl ) )
 
 repFE <- objFE$report()
-sdrepFR <- summary(sdreport(objFE))
+sdrepFE <- summary(sdreport(objFE))
 
+# if(class(fitFE) != "try-error" )
+# {
+#   objRE <- MakeADFun( data=dat,parameters=par,map=map, 
+#                       silent = TRUE,
+#                       random=c("recDevs_t","omegaM_t") )
+
+#   bestPars <- fitFE$par[names(fitFE$par) %in% names(objRE$par)]
+
+#   fitRE <- try( nlminb (  start     = bestPars,
+#                           objective = objRE$fn,
+#                           gradient  = objRE$gr,
+#                           control   = ctrl ) )
+
+#   repRE <- objRE$report()
+#   sdrepRE <- summary(sdreport(objRE))
+# }
