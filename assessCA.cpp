@@ -85,6 +85,7 @@ Type objective_function<Type>::operator() ()
   DATA_IVECTOR(indexType_g);    // Type of survey (0 = relative, 1 = absolute)
   DATA_IVECTOR(calcIndex_g);    // Calculate fleet index (0 = no, yes = 1)
   DATA_IVECTOR(selType_g);      // Type of selectivity (0 = asymptotic, 1 = domed (normal))
+  DATA_IVECTOR(selLen_g);       // Len or Age base selectivity (0 = age, 1 = length)
   DATA_VECTOR(fleetTiming);     // Fraction of year before catch/survey observation
   DATA_INTEGER(initCode);       // initialise at 0 => unfished, 1=> fished
   DATA_SCALAR(posPenFactor);    // Positive-penalty multiplication factor
@@ -121,7 +122,7 @@ Type objective_function<Type>::operator() ()
   PARAMETER_VECTOR(rSteepBetaPrior);    // pars for Beta dist steepness prior
   PARAMETER_VECTOR(initMPrior);         // pars for initial M prior (mean,sd)
   PARAMETER_VECTOR(mq);                 // prior mean catchability 
-  PARAMETER_VECTOR(sdq);                 // prior mean catchability 
+  PARAMETER_VECTOR(sdq);                // prior mean catchability 
 
   // Fixed LH parameters
   PARAMETER_VECTOR( aMat );             // Maturity ogive parameters (ages at 50% and 95% mature)
@@ -131,7 +132,8 @@ Type objective_function<Type>::operator() ()
   PARAMETER_VECTOR( lenWt );            // Allometric length/weight c1, c2 parameters
 
   // Max selectivity age
-  PARAMETER_VECTOR(maxSelAge);          // age at max selectivity, used as a prior mean
+  PARAMETER_VECTOR(mSelMode_g);         // prior mean selectivity mode
+  PARAMETER(selModeCV);                 // selectivity mode/a95 CV
   
   
 
@@ -179,7 +181,7 @@ Type objective_function<Type>::operator() ()
   selNLP_g.fill(0.0);
 
 
-  // Life schedules
+  // Life history schedules
   vector<Type>  age(nA);
   vector<Type>  wt(nA);
   vector<Type>  len(nA);
@@ -189,8 +191,8 @@ Type objective_function<Type>::operator() ()
   // Selectivity values
   array<Type>   sel_ag(nA,nG);  
   // Get max sel age
-  vector<Type>  selModeAge_g(nG);
-  selModeAge_g.fill(0.); 
+  vector<Type>  selModeX_g(nG);
+  selModeX_g.fill(0.); 
 
   // State variables
   array<Type>   N_at(nA,nT+1);          // Numbers at age
@@ -264,17 +266,25 @@ Type objective_function<Type>::operator() ()
   // Calculate selectivity
   for( int g = 0; g < nG; g++ )
   {
+    Type selX = 0.;
     // Check seltype switch (asymptotic vs dome)
     if( selType_g(g) == 0)
     {
       // asymptotic
-      Type aSel50   = SelAlpha_g(g);
-      Type aSel95   = SelAlpha_g(g) + SelBeta_g(g);
-      Type tmp      = log(19.)/( aSel95 - aSel50 );
+      Type xSel50   = SelAlpha_g(g);
+      Type xSel95   = SelAlpha_g(g) + SelBeta_g(g);
+      Type tmp      = log(19.)/( xSel95 - xSel50 );
       for( int a = 0; a < nA; a++ )
-        sel_ag(a,g) = 1./( 1. + exp(-tmp*( Type(age(a)) - aSel50 ) ) );
+      {
+        if( selLen_g(g) == 1 )
+          selX = len(a);
+        if( selLen_g(g) == 0)
+          selX = age(a);
 
-      selModeAge_g(g) = aSel95;
+        sel_ag(a,g) = 1./( 1. + exp(-tmp*( selX - xSel50 ) ) );
+      }
+
+      selModeX_g(g) = xSel95;
     }
 
     if( selType_g(g) == 1)
@@ -283,13 +293,21 @@ Type objective_function<Type>::operator() ()
       Type nSelMean = SelAlpha_g(g);
       Type nSelSD   = SelBeta_g(g);
       for( int a = 0; a < nA; a++)
-        sel_ag(a,g) = exp(-1. * square((age(a) - nSelMean)/nSelSD) );
-
-      selModeAge_g(g) = nSelMean;
+      {
+        // Check if length or age based selectivity
+        if( selLen_g(g) == 1 )
+          selX = len(a);
+        if( selLen_g(g) == 0)
+          selX = age(a);
+        // Compute selectivity function
+        sel_ag(a,g) = exp(-1. * square((selX - nSelMean)/nSelSD) );
+      }
+      // Save mode age/length for a prior later
+      selModeX_g(g) = nSelMean;
     }    
   }
 
-  // Loop through all fleets  in 2 nested loops, and build a 
+  // Loop through all fleets in 2 nested loops, and build a 
   // new vector of indices in chronological order
   Type          minTime = 0;
   Type          prevTime = 0;
@@ -487,6 +505,7 @@ Type objective_function<Type>::operator() ()
           validObs_g(gIdx) += int(1);
         }
       }
+      SSR_g(gIdx) = 0.;
       // Calculate conditional MLE of q
       // if a relative index
       if( indexType_g(gIdx) == 0 )
@@ -498,15 +517,14 @@ Type objective_function<Type>::operator() ()
         // inclusion in likelihood
         for(int t = 0; t < nT; t++)
           if( I_tg(t,gIdx) > 0.0)
+          {
             z_tg(t,gIdx) -= lnqhat_g(gIdx);
+            // Sum squared resids
+            SSR_g(gIdx) += square(z_tg(t,gIdx));    
+          }
       }
       // Calculate conditional MLE of observation
       // index variance
-      // Sum squared resids
-      SSR_g(gIdx) = 0.;
-      for(int t = 0; t < nT; t++ )
-        SSR_g(gIdx) += square(z_tg(t,gIdx));
-      // concentrate obs error SD
       tauObs_g(gIdx) = sqrt(SSR_g(gIdx)/validObs_g(gIdx));
 
       // Add concentrated nll value using cond MLE of tauObs
@@ -577,7 +595,7 @@ Type objective_function<Type>::operator() ()
   // Recruitment priors
   // Add recruitment deviations to rec NLL; sigmR is estimated
   for( int tIdx = firstRecDev - 1; tIdx < nT; tIdx ++ )
-    recNLP += 0.5 * ( lnsigmaR + pow( recDevs_t(tIdx - firstRecDev + 1) / sigmaR, 2 ));
+    recNLP += 0.5 * ( lnsigmaR + pow( recDevs_t( tIdx - firstRecDev + 1 ) / sigmaR, 2 ));
 
   // Now do a beta prior on steepness
   // Steepness prior pars passed in as a 2ple
@@ -602,15 +620,17 @@ Type objective_function<Type>::operator() ()
   // Catchability, index obs error variance,
   // and a prior on selectivity pars
   qhat_g = exp(lnqhat_g);
+  vector<Type> selModeNLP_g(nG);
+  selModeNLP_g.setZero();
   for( int gIdx = 0; gIdx < nG; gIdx++ )
   {
     qNLP += .5* square( ( qhat_g(gIdx) - mq(gIdx) ) / sdq(gIdx) );  
     // IG prior on survey obs err variance
     if( calcIndex_g(gIdx) == 1 )
       nlptau2idx_g(gIdx) += (obstau2IGa(gIdx)+Type(1))*2*log(tauObs_g(gIdx)) + obstau2IGb(gIdx)/square(tauObs_g(gIdx));
-  }
 
-  
+    selModeNLP_g(gIdx) += pow((selModeX_g(gIdx) - mSelMode_g(gIdx))/(selModeCV*mSelMode_g(gIdx)),2 );
+  }
 
 
   
@@ -624,19 +644,20 @@ Type objective_function<Type>::operator() ()
             obsIdxNLL_g.sum() + 
             ageObsNLL_g.sum() + 
             qNLP + 
-            nlptau2idx_g.sum();
+            nlptau2idx_g.sum() +
+            selModeNLP_g.sum();
 
-  // // Convert some values to log scale
-  // // for sd reporting
+  // Convert some values to log scale
+  // for sd reporting
   vector<Type> lnSB_t       = log(SB_t);
   vector<Type> lnD_t        = log(SB_t) - lnB0;
   vector<Type> lnR_t        = log(R_t);
   vector<Type> lnM_t        = log(M_t);
-  // //arrays for ADREPORT
-  // array<Type>  lnF_tg(nT,nG);
-  // for( int tIdx = 0; tIdx < nT; tIdx ++ )
-  //   for( int gIdx = 0; gIdx < nT; gIdx ++ )
-  //     lnF_tg(tIdx,gIdx) = log(F_tg(tIdx,gIdx));
+  //arrays for ADREPORT
+  array<Type>  lnF_tg(nT,nG);
+  for( int tIdx = 0; tIdx < nT; tIdx ++ )
+    for( int gIdx = 0; gIdx < nG; gIdx ++ )
+      lnF_tg(tIdx,gIdx) = log(F_tg(tIdx,gIdx));
 
   /*\/\/\/\/\ REPORTING SECTION /\/\/\/\*/
   // Variables we want SEs for
@@ -644,7 +665,8 @@ Type objective_function<Type>::operator() ()
   ADREPORT(lnR_t);
   ADREPORT(lnM_t);
   ADREPORT(lnM);
-  // ADREPORT(lnF_tg);
+  ADREPORT(lnB0);
+  ADREPORT(lnF_tg);
   ADREPORT(lnqhat_g);
   ADREPORT(lnD_t);
   ADREPORT(logit_ySteepness);
@@ -677,7 +699,7 @@ Type objective_function<Type>::operator() ()
   REPORT(sel_ag);
   REPORT(SelAlpha_g);
   REPORT(SelBeta_g);
-  REPORT(selModeAge_g);
+  REPORT(selModeX_g);
 
   // SR Variables
   REPORT(R0);
@@ -747,6 +769,7 @@ Type objective_function<Type>::operator() ()
   REPORT(nlptau2idx_g);
   REPORT(steepness_nlp);
   REPORT(posPen);
+  REPORT(selModeNLP_g);
   
   return objFun;
 }

@@ -55,7 +55,7 @@ A_atg[2:35,,5] <- t(ages$ageobsProp_f3)
 
 for(g in 1:5)
   for(t in 1:nT)
-    if(abs(sum(A_atg[,t,g])) < 1e-1 ) 
+    if(abs(sum(A_atg[,t,g])) > 0 ) 
       A_atg[1,t,g] <- 0
 
 firstRecDev <- 10
@@ -68,18 +68,19 @@ dat <- list(  I_tg = I_tg,
               survType_g = c(1,-1,-1,1,1),
               indexType_g = c(0,-1,-1,0,0),
               calcIndex_g = c(1,0,0,1,1),
-              selType_g = c(0,0,1,0,0),
+              selType_g = c(1,1,1,0,0),
+              selLen_g = c(1,1,1,0,0),
               fleetTiming = c(.49,.5,.51,.74,.76),
               initCode = c(0),
               posPenFactor = c(1e4),
               firstRecDev = firstRecDev )
 
-par <- list(  lnB0 = 6,
-              logit_ySteepness = 3,
+par <- list(  lnB0 = 5,
+              logit_ySteepness = 0,
               lnM = -2.7,
               log_initN_mult = rep(0,35),
-              lnSelAlpha_g = c(1.6,1.6,1.09,1.6,1.6),
-              lnSelBeta_g = c(2,2,0.5,2,2),
+              lnSelAlpha_g = c(4.24,4.24,3.4,1.6,1.6),
+              lnSelBeta_g = c(3.29,2.98,2.99,2,2),
               lntauAge_g = rep(-1.6,5),
               effSampleSize_g = rep(100,5),
               recDevs_t = rep(0,nT-firstRecDev + 1 ),
@@ -90,16 +91,17 @@ par <- list(  lnB0 = 6,
               obstau2IGb = 2*tau2Obs,
               sig2RPrior = c(1,2),
               sig2MPrior = c(1,0.04),
-              rSteepBetaPrior = c(22,18),
+              rSteepBetaPrior = c(1.1,.9),
               initMPrior = c(.06,.006),
               mq = c(0.395296,1,1,0.294597,0.752047),
-              sdq = c(0.395296,1,1,0.294597,0.752047)/3,
+              sdq = c(0.395296,1,1,0.294597,0.752047)/2,
               aMat = c(5,12),
               Linf = c(70),
               L1 = c(32.5),
               vonK = c(.275),
               lenWt = c(1.04e-5,3.07),
-              maxSelAge = c(5,5,2,3,3))
+              mSelMode_g = c(69.1,71.1,32,5,5),
+              selModeCV = 1 )
 
 
 map <- list(  # lnB0 =factor(NA),
@@ -109,6 +111,7 @@ map <- list(  # lnB0 =factor(NA),
               lnSelAlpha_g = factor(c(1,NA,NA,2,3)),
               lnSelBeta_g = factor(c(1,NA,NA,2,3)),
               # recDevs_t = factor(rep(NA,nT-firstRecDev + 1)),
+              effSampleSize_g = factor(rep(NA,5)),
               lnsigmaR = factor(NA),
               omegaM_t = factor(rep(NA,nT-1)),
               lnsigmaM = factor(NA),
@@ -123,7 +126,10 @@ map <- list(  # lnB0 =factor(NA),
               L1 = factor(c(NA)),
               vonK = factor(c(NA)),
               lenWt = factor(c(NA,NA)),
-              maxSelAge = factor(rep(NA,5)) )
+              mSelMode_g = factor(rep(NA,5)),
+              selModeCV  = factor(NA),
+              mq = factor(rep(NA,5)),
+              sdq = factor(rep(NA,5)) )
 
 
 
@@ -142,19 +148,19 @@ fitFE <- try( nlminb (  start     = objFE$par,
 repFE <- objFE$report()
 sdrepFE <- summary(sdreport(objFE))
 
-# if(class(fitFE) != "try-error" )
-# {
-#   objRE <- MakeADFun( data=dat,parameters=par,map=map, 
-#                       silent = TRUE,
-#                       random=c("recDevs_t","omegaM_t") )
+if(class(fitFE) != "try-error" )
+{
+  objRE <- MakeADFun( data=dat,parameters=par,map=map, 
+                      silent = TRUE,
+                      random=c("recDevs_t","omegaM_t") )
 
-#   bestPars <- fitFE$par[names(fitFE$par) %in% names(objRE$par)]
+  bestPars <- fitFE$par[names(fitFE$par) %in% names(objRE$par)]
 
-#   fitRE <- try( nlminb (  start     = bestPars,
-#                           objective = objRE$fn,
-#                           gradient  = objRE$gr,
-#                           control   = ctrl ) )
+  fitRE <- try( nlminb (  start     = bestPars,
+                          objective = objRE$fn,
+                          gradient  = objRE$gr,
+                          control   = ctrl ) )
 
-#   repRE <- objRE$report()
-#   sdrepRE <- summary(sdreport(objRE))
-# }
+  repRE <- objRE$report()
+  sdrepRE <- summary(sdreport(objRE))
+}
